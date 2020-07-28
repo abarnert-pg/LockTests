@@ -166,6 +166,26 @@ static inline void futex_lock(int32_t *lock) {
                             __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) != 0);
 }
 
+static inline void futex_lock_weak(int32_t *lock) {
+    int32_t val = 0;
+    if (__atomic_compare_exchange_n(lock, &val, 1,
+                                    false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        return;
+    }
+
+    do {
+        if (val != 2) {
+            val = 1;
+            if (!__atomic_compare_exchange_n(lock, &val, 2,
+                                             true, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+                if (val == 0) continue;
+            }
+        }
+        futex(lock, FUTEX_WAIT, 2, NULL);
+    } while ((val = cmpxchg(lock, 0, 2,
+                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) != 0);
+}
+
 static inline void futex_unlock(int32_t *lock) {
     if (__atomic_fetch_sub(lock, 1, __ATOMIC_RELEASE) != 1) {
         __atomic_store_n(lock, 0, __ATOMIC_RELEASE);
@@ -187,6 +207,12 @@ struct Futex {
     }
     void unlock() {
         return futex_unlock(&l);
+    }
+};
+
+struct FutexWeak : Futex {
+    void lock() {
+        return futex_lock_weak(&l);
     }
 };
 
@@ -312,14 +338,14 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_example_locktests_MainActivity_stringFromJNI(
         JNIEnv* env,
         jobject /* this */) {
-    static const int reps = 10000;
+    static const int reps = 100000;
     static const int inner = 1000;
-    static const int nthreads = 64;
+    static const int nthreads = 16;
     std::stringstream s;
     AndroidLogStream als;
     auto ss = tie_streams(s, als);
     Burn tburn(8);
-    for (int pshared: {0, 1, 2, 5, 10, 25, 50, 75, 90, 99}) {
+    for (int pshared: {0, 1, 2, 5/*, 10, 25, 50, 75, 90, 99*/}) {
         ss << "\n" << pshared << "%\n";
         ss << test<std::mutex>(reps, inner, nthreads, pshared) << " std::mutex\n";
         ss << test<PThreadMutexNormal>(reps, inner, nthreads, pshared) << " pthread normal\n";
@@ -327,6 +353,7 @@ Java_com_example_locktests_MainActivity_stringFromJNI(
         ss << test<SpinLock>(reps, inner, nthreads, pshared) << " spin yield\n";
         //ss << test<SpinLockSpin>(reps, inner, nthreads, pshared) << " spin spin\n";
         ss << test<Futex>(reps, inner, nthreads, pshared) << " futex\n";
+        ss << test<FutexWeak>(reps, inner, nthreads, pshared) << " futex weak\n";
         //ss << test<Dummy, std::atomic<int64_t>>(reps, inner, nthreads, pshared) << " atomic\n";
     }
     done = true;
